@@ -1,0 +1,1022 @@
+// Prisma schema for Family Hub
+// See https://pris.ly/d/prisma-schema
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  PARENT
+  CHILD
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  name         String
+  passwordHash String
+  role         UserRole  @default(CHILD)
+  color        String    @default("#7c3aed")
+  avatarEmoji  String    @default("🙂")
+  dateOfBirth  DateTime?
+  // v4.7.15 — controls whether this family member's birthday appears as a
+  // yearly all-day event on the shared calendar. Defaults to true so existing
+  // members with a DOB set start showing on the calendar immediately after
+  // the migration; turn it off per-person if you'd rather hide them.
+  // Pairs with `linkedBirthdayEventId`, which is the Event row managed by
+  // lib/birthdays.ts → syncUserBirthdayEvent.
+  showBirthdayOnCalendar Boolean @default(true)
+  linkedBirthdayEventId  String? @unique
+  linkedBirthdayEvent    Event?  @relation("UserBirthdayEvent", fields: [linkedBirthdayEventId], references: [id], onDelete: SetNull)
+  // Set to true for the bootstrap parent account created by seed.cjs using
+  // the default parent@example.com / changeme credentials. The (app) layout
+  // redirects any user with this flag to /setup, where they pick a real
+  // email + name + password before touching the rest of the app.
+  mustChangeCredentials Boolean @default(false)
+  // v4.8.1 — parent-managed kill switch for this user's event reminders.
+  // Defaults TRUE so the upgrade preserves existing behaviour (everyone
+  // who's a participant on an event still gets a reminder). Parents can
+  // flip it OFF on a child from Settings → Family when, e.g., they're
+  // handing the kid a kiosk that shouldn't ping. Independent of the
+  // parent-side "shadow my child's reminders" flag.
+  receivesOwnEventReminders Boolean @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  permissions       UserPermissions?
+  createdEvents     Event[]             @relation("EventCreator")
+  createdEventReminders EventReminder[] @relation("EventReminderCreator")
+  eventMemberships  EventParticipant[]
+  createdTodos      Todo[]              @relation("TodoCreator")
+  assignedTodos     Todo[]              @relation("TodoAssignee")
+  addedShopping     ShoppingItem[]      @relation("ShoppingAdder")
+  // v4.7.19 — back-link for ShoppingMaster rows created by this user.
+  createdShoppingMasters ShoppingMaster[] @relation("ShoppingMasterCreator")
+  reminders         Reminder[]
+  pointsAsChild     PointsTransaction[] @relation("PointsChild")
+  pointsAwarded     PointsTransaction[] @relation("PointsAwarder")
+  // v4.7.7 — rewards catalogue: items / categories the parent created and
+  // redemptions made by this user (as a child).
+  rewardItemsCreated      RewardItem[]      @relation("RewardItemCreator")
+  rewardCategoriesCreated RewardCategory[]  @relation("RewardCategoryCreator")
+  rewardRedemptions       RewardRedemption[] @relation("RewardRedeemingChild")
+  rewardRedemptionsActed  RewardRedemption[] @relation("RewardRedemptionActor")
+  createdRecipes    Recipe[]            @relation("RecipeCreator")
+  menuEntries       MenuEntry[]         @relation("MenuCreator")
+  uploadedPhotos    Photo[]             @relation("PhotoUploader")
+  maintenanceItems  MaintenanceItem[]   @relation("MaintenanceOwner")
+  serviceRecords    ServiceRecord[]     @relation("ServiceLogger")
+  createdBirthdays  Birthday[]          @relation("BirthdayCreator")
+  createdTodoCategories TodoCategory[]  @relation("TodoCategoryCreator")
+  // v4.7 — home kiosks that act as this user when signed in locally.
+  localDevices      LocalDevice[]       @relation("DeviceActAsUser")
+  // v4.7.4 — My Taxes. Strictly per-user; no one else can read these rows.
+  taxCategories     TaxCategory[]       @relation("TaxCategoryOwner")
+  taxReceipts       TaxReceipt[]        @relation("TaxReceiptOwner")
+  // v4.7.9 — Web Push subscriptions, one row per browser/device.
+  pushSubscriptions PushSubscription[]
+  // v4.9.0 — public API & webhook integrations (HomeAssistant etc.). The
+  // creator FK is SetNull on delete so revoking a parent account doesn't
+  // strand integrations the rest of the family depends on.
+  apiTokensCreated       ApiToken[]            @relation("ApiTokenCreator")
+  webhooksCreated        WebhookSubscription[] @relation("WebhookSubscriptionCreator")
+  // v4.9.2 — family sticky-notes board ("fridge magnets" use case). Cascade
+  // on delete so revoking a user wipes the notes they posted — they're
+  // ephemeral by nature and orphaned notes would just confuse the board.
+  stickyNotes            StickyNote[]          @relation("StickyNoteAuthor")
+}
+
+model UserPermissions {
+  id               String  @id @default(cuid())
+  userId           String  @unique
+  user             User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  canViewCalendar  Boolean @default(true)
+  canEditCalendar  Boolean @default(true)
+  canViewTodos     Boolean @default(true)
+  canEditTodos     Boolean @default(true)
+  canViewShopping  Boolean @default(true)
+  canEditShopping  Boolean @default(true)
+  canManageUsers   Boolean @default(false)
+
+  // v3 feature permissions. Children default to "view" but not "manage".
+  canViewMenu       Boolean @default(true)
+  canEditMenu       Boolean @default(false)
+  canViewRecipes    Boolean @default(true)
+  canEditRecipes    Boolean @default(false)
+  canViewRewards    Boolean @default(true)
+  canManageRewards  Boolean @default(false)
+  canViewPhotos     Boolean @default(true)
+  canManagePhotos   Boolean @default(false)
+  canViewReminders  Boolean @default(true)
+  canEditReminders  Boolean @default(true)
+  canViewMaintenance    Boolean @default(false)
+  canManageMaintenance  Boolean @default(false)
+
+  // v4.8.1 — parent-only opt-in. When TRUE on a PARENT user, the reminder
+  // scheduler also spawns a Reminder on this parent for every event reminder
+  // that fires on any CHILD user. Defaults FALSE so the upgrade is silent;
+  // parents flip it themselves in Settings → Notifications.
+  notifyOnChildEventReminders Boolean @default(false)
+}
+
+enum RecurrenceFrequency {
+  DAILY
+  WEEKLY
+  MONTHLY
+  YEARLY
+}
+
+model Event {
+  id          String   @id @default(cuid())
+  title       String
+  description String?
+  startAt     DateTime
+  endAt       DateTime
+  allDay      Boolean  @default(false)
+  location    String?
+  color       String?
+  starred     Boolean  @default(false)
+
+  // Recurrence fields. If recurrenceFrequency is null, the event is a one-off.
+  // byWeekday is a comma-separated list of 0-6 (0 = Sunday) used only when
+  // recurrenceFrequency = WEEKLY. endDate and endCount are mutually exclusive;
+  // if both are null the event repeats indefinitely.
+  recurrenceFrequency RecurrenceFrequency?
+  recurrenceInterval  Int?
+  recurrenceByWeekday String?
+  recurrenceEndDate   DateTime?
+  recurrenceEndCount  Int?
+
+  createdById  String
+  createdBy    User               @relation("EventCreator", fields: [createdById], references: [id])
+  participants EventParticipant[]
+  reminders    EventReminder[]
+  // Back-link when the event was auto-created for a Birthday row. Lets us
+  // find (and clean up) the event whenever the birthday is deleted.
+  birthday     Birthday?          @relation("BirthdayEvent")
+  // v4.7.15 — back-link when the event was auto-created from a User's
+  // dateOfBirth + showBirthdayOnCalendar flag. Same shape as `birthday`
+  // above but anchored to a User instead of a Birthday row.
+  userBirthdayHolder User?        @relation("UserBirthdayEvent")
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+
+  @@index([startAt, endAt])
+  @@index([starred])
+}
+
+model EventParticipant {
+  id      String @id @default(cuid())
+  eventId String
+  userId  String
+  event   Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, userId])
+}
+
+// A single scheduled reminder attached to a calendar event. The runtime
+// reminder-scheduler materialises these into Reminder rows on the event's
+// participants (or creator fallback) at (event.startAt - minutesBefore).
+model EventReminder {
+  id            String   @id @default(cuid())
+  eventId       String
+  event         Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  minutesBefore Int      // 0 = at start, 15 = 15 min before, 1440 = 1 day before, etc.
+  deliveryInApp Boolean  @default(true)
+  deliveryEmail Boolean  @default(false)
+  createdById   String
+  createdBy     User     @relation("EventReminderCreator", fields: [createdById], references: [id])
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([eventId, minutesBefore])
+  @@index([eventId])
+}
+
+model Todo {
+  id          String    @id @default(cuid())
+  title       String
+  description String?
+  done        Boolean   @default(false)
+  dueAt       DateTime?
+  priority    Int       @default(0)
+  createdById String
+  createdBy   User      @relation("TodoCreator", fields: [createdById], references: [id])
+  assigneeId  String?
+  assignee    User?     @relation("TodoAssignee", fields: [assigneeId], references: [id])
+  // Optional parent-managed category (e.g. "House", "Kids"). SetNull when
+  // the category is deleted so the todo survives.
+  categoryId  String?
+  category    TodoCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  // Surfaces this todo on the shared calendar (uses dueAt as the anchor).
+  showOnCalendar Boolean @default(false)
+  // Same recurrence shape as Event — see Event for field semantics.
+  recurrenceFrequency RecurrenceFrequency?
+  recurrenceInterval  Int?
+  recurrenceByWeekday String?
+  recurrenceEndDate   DateTime?
+  recurrenceEndCount  Int?
+  // v4.7.7 — rewards integration. When non-zero AND the assignee is a child,
+  // marking this todo done atomically credits the assignee with the points
+  // (via a PointsTransaction) and records the transaction id below so we
+  // never double-pay. Recurring todos roll a fresh row forward, which has
+  // its own un-stamped slot — so each completion earns once.
+  pointsReward                Int     @default(0)
+  pointsAwardedTransactionId  String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([categoryId])
+  @@index([dueAt])
+}
+
+// Parent-managed named lists for grouping todos. Added from Settings. Each
+// has an optional custom colour for UI pills.
+model TodoCategory {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  color       String?  // #rrggbb
+  position    Int      @default(0) // display order
+  createdById String
+  createdBy   User     @relation("TodoCategoryCreator", fields: [createdById], references: [id])
+  todos       Todo[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([position])
+}
+
+model ShoppingItem {
+  id        String   @id @default(cuid())
+  name      String
+  quantity  String?
+  category  String?
+  done      Boolean  @default(false)
+  addedById String
+  addedBy   User     @relation("ShoppingAdder", fields: [addedById], references: [id])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// v4.7.19 — reusable master catalogue of things the family commonly buys.
+// Every time a ShoppingItem is created (form, recipe → list, menu → list) the
+// matching master is upserted via lib/shopping-master.ts → upsertMaster: its
+// useCount bumps, lastUsedAt stamps, and any blank fields (category /
+// defaultQuantity) inherit from the new item. The shopping page exposes a
+// "Catalog" tab that lists masters grouped by category so families can quick-
+// tap recurring items instead of retyping "milk" every week.
+//
+// `nameKey` is the lowercased-trimmed-collapsed-whitespace form of `name` and
+// carries the uniqueness constraint so "Milk", "milk", "  MILK " all resolve
+// to the same master without needing citext on the DB side.
+//
+// `hidden` is a soft-delete: keeps the row around so existing items still
+// reference a meaningful master if you ever want to un-hide, but excludes it
+// from the catalog picker.
+model ShoppingMaster {
+  id              String    @id @default(cuid())
+  name            String
+  nameKey         String    @unique
+  category        String?
+  defaultQuantity String?
+  useCount        Int       @default(0)
+  lastUsedAt      DateTime?
+  hidden          Boolean   @default(false)
+  // Optional — null when the row was seeded by a backup-restore that ran
+  // before the user table populated, or when the original creator was deleted.
+  createdById     String?
+  createdBy       User?     @relation("ShoppingMasterCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([category, name])
+  @@index([lastUsedAt])
+}
+
+// Cached public holidays fetched from the Nager.Date public API.
+// Re-synced automatically on first boot and on demand from settings.
+model Holiday {
+  id          String   @id @default(cuid())
+  countryCode String   // ISO 3166-1 alpha-2 (e.g. "GB", "US")
+  date        DateTime // UTC midnight of the holiday date
+  name        String
+  localName   String?
+  year        Int
+  global      Boolean  @default(true)
+  counties    String?  // Comma-separated sub-regions when not global
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([countryCode, date, name])
+  @@index([date])
+  @@index([countryCode, year])
+}
+
+// Singleton row (id = "singleton") holding app-wide settings.
+model AppSettings {
+  id              String    @id @default("singleton")
+  countryCode     String    @default("GB")
+  timezone        String    @default("Europe/London")
+  showHolidays    Boolean   @default(true)
+  lastHolidaySync DateTime?
+
+  // SMTP configuration for reminder emails. Leave blank to disable email
+  // delivery (reminders will still fire as in-app toasts).
+  smtpHost        String?
+  smtpPort        Int?      @default(587)
+  smtpSecure      Boolean   @default(false)
+  smtpUser        String?
+  smtpPass        String?
+  smtpFrom        String?
+
+  // Photo screensaver cadence (ms between slide transitions).
+  screensaverIntervalMs Int @default(6000)
+
+  // Idle minutes before the app auto-launches the photo screensaver.
+  // 0 = disabled. Non-interactive routes like /screensaver itself opt out.
+  screensaverIdleMinutes Int @default(0)
+
+  // v4.6 — shuffle screensaver slideshow into random order on each pass. When
+  // false, photos cycle in upload order (newest first).
+  screensaverShuffle Boolean @default(false)
+
+  // --- v4.6 weather ---
+  // Master switch — when off the API stops fetching and no surface displays
+  // weather regardless of the show-on-* toggles below.
+  weatherEnabled       Boolean  @default(false)
+  // v4.7 — per-surface visibility. Users asked for independent control over
+  // whether weather appears on the home dashboard vs. the screensaver, so a
+  // single master toggle wasn't enough. Both default to true so that enabling
+  // weather for the first time behaves like the old "everywhere" checkbox.
+  weatherShowOnHome        Boolean @default(true)
+  weatherShowOnScreensaver Boolean @default(true)
+  // Human-readable location (as picked from the geocoder). Stored so we can
+  // show "Sydney, AU" without re-geocoding on every render.
+  weatherLocationLabel String?
+  weatherLatitude      Float?
+  weatherLongitude     Float?
+  // "auto" (route AU → BOM, otherwise → Open-Meteo), "bom" (force BOM), or
+  // "open-meteo" (force Open-Meteo).
+  weatherProvider      String   @default("auto")
+  // "metric" = °C, km/h. "imperial" = °F, mph.
+  weatherUnits         String   @default("metric")
+
+  // Custom calendar group colours. All optional — when null the calendar
+  // falls back to the event/member colour as before.
+  todoColor      String?
+  birthdayColor  String?
+  holidayColor   String?
+
+  // First day of the week for calendar & menu grids. 0 = Sunday, 1 = Monday.
+  // Defaults to Monday which matches UK/EU conventions.
+  weekStartsOn     Int     @default(1)
+
+  // Night sleep-mode (kiosk dim) configuration. When enabled, the entire app
+  // shell is covered by a black overlay between the start/end hours. Times
+  // are stored as "HH:mm" strings in the AppSettings.timezone above. Tap or
+  // any input wakes the screen; after `sleepIdleMinutes` of no activity the
+  // overlay auto-returns (still inside the window).
+  sleepModeEnabled Boolean @default(false)
+  sleepStartTime   String  @default("22:00")
+  sleepEndTime     String  @default("07:00")
+  sleepIdleMinutes Int     @default(5)
+
+  // v4.7.4 — Family-wide financial year window used by the My Taxes feature.
+  // Defaults to the Australian FY (1 July – 30 June). Day is clamped 1–28 so
+  // every month works without leap-year edge cases.
+  financialYearStartMonth Int @default(7)
+  financialYearStartDay   Int @default(1)
+
+  // v4.7.9 — VAPID identity for Web Push. Lazily generated on first request
+  // to /api/push/vapid-key and stored here so the same key pair survives
+  // restarts. Subject is the contact URL/email push services may use to
+  // reach the operator if our server misbehaves.
+  // v4.8.2 — app-wide module hide list. Stores module IDs that should be
+  // removed everywhere (nav, direct route access, kiosk pickers). See
+  // lib/modules.ts for the catalogue of toggleable module IDs. JSON
+  // because the set is small, sparse, and grows with new releases — a
+  // dedicated boolean column per module would be a migration treadmill.
+  disabledModules     Json    @default("[]")
+
+  pushVapidPublicKey  String?
+  pushVapidPrivateKey String?
+  // v4.8.1 — switched from the .local placeholder (which some push services
+  // reject as an invalid mailto target) to a real-shape placeholder. The
+  // operator should override this in Settings → Notifications, but the new
+  // default is at least syntactically valid for every push service we've
+  // tested.
+  pushVapidSubject    String? @default("mailto:admin@example.com")
+
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}
+
+// ------------------------------ v3 models ------------------------------
+
+// Scheduled reminder for a specific user. Fires as an in-app toast and,
+// if SMTP is configured, an email to the user's address.
+model Reminder {
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title          String
+  body           String?
+  remindAt       DateTime
+  deliveryInApp  Boolean  @default(true)
+  deliveryEmail  Boolean  @default(false)
+  sent           Boolean  @default(false)
+  sentAt         DateTime?
+  deliveryError  String?
+  // When the toast has been dismissed in the UI. Separate from `sent` so the
+  // scheduler can still send email + surface the toast until dismissed.
+  acknowledgedAt DateTime?
+  // Back-link for reminders spawned from a calendar event. When non-null,
+  // deleting the source EventReminder also unsends any pending Reminder rows.
+  sourceEventReminderId String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([remindAt, sent])
+  @@index([userId, sent])
+  @@index([sourceEventReminderId])
+}
+
+// Ledger entry for a points change on a child. `points` may be negative
+// (e.g. parent deducts points for a redemption or infraction).
+model PointsTransaction {
+  id           String   @id @default(cuid())
+  childId      String
+  child        User     @relation("PointsChild", fields: [childId], references: [id], onDelete: Cascade)
+  awardedById  String
+  awardedBy    User     @relation("PointsAwarder", fields: [awardedById], references: [id])
+  points       Int
+  reason       String
+  createdAt    DateTime @default(now())
+
+  @@index([childId, createdAt])
+}
+
+model Recipe {
+  id           String             @id @default(cuid())
+  title        String
+  description  String?
+  servings     Int?
+  prepMinutes  Int?
+  cookMinutes  Int?
+  // Legacy external URL, kept so v4.5-and-earlier rows stay visible. New
+  // recipes upload a file instead — see `imageFilename` below.
+  imageUrl     String?
+  // File sitting under the shared uploads volume at
+  // /app/uploads/recipe-images/<filename>. Only the bare name is stored.
+  imageFilename        String?
+  instructions String             @default("") // markdown-ish free text
+  tags         String?            // csv
+  // v4.6 — nutrition. Both optional; `caloriesPerServing` auto-derives from
+  // `caloriesTotal / servings` if the user leaves it blank.
+  caloriesTotal        Int?
+  caloriesPerServing   Int?
+  createdById  String
+  createdBy    User               @relation("RecipeCreator", fields: [createdById], references: [id])
+  ingredients  RecipeIngredient[]
+  menuEntries  MenuEntry[]
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+
+  @@index([title])
+}
+
+model RecipeIngredient {
+  id        String @id @default(cuid())
+  recipeId  String
+  recipe    Recipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+  name      String
+  quantity  String?
+  unit      String?
+  category  String?  // maps to shopping-list category when auto-adding
+  position  Int      @default(0)
+
+  @@index([recipeId, position])
+}
+
+enum MealType {
+  BREAKFAST
+  LUNCH
+  DINNER
+  SNACK
+}
+
+// A single entry on the weekly menu grid. A (date, mealType) slot can hold
+// multiple entries (handy for party planning — several dishes per dinner).
+// `position` controls the rendered order within a slot; clients should sort
+// ascending.
+model MenuEntry {
+  id          String   @id @default(cuid())
+  date        DateTime // day key — time set to 00:00 UTC
+  mealType    MealType
+  position    Int      @default(0)
+  recipeId    String?
+  recipe      Recipe?  @relation(fields: [recipeId], references: [id], onDelete: SetNull)
+  freeformTitle String?
+  notes       String?
+  createdById String
+  createdBy   User     @relation("MenuCreator", fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([date, mealType, position])
+  @@index([date])
+}
+
+// Photo uploaded for the dashboard/screensaver slideshow. Files live on the
+// shared `uploads` Docker volume; only the filename is stored in the DB.
+model Photo {
+  id           String   @id @default(cuid())
+  filename     String   @unique
+  caption      String?
+  uploadedById String
+  uploadedBy   User     @relation("PhotoUploader", fields: [uploadedById], references: [id])
+  mimeType     String
+  sizeBytes    Int
+  createdAt    DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+// Birthdays added manually in the Birthdays tab (for friends, extended family,
+// etc). Saving one auto-creates/updates a yearly all-day Event so it shows on
+// the calendar. Family-member birthdays still live on `User.dateOfBirth` and
+// are merged into the Birthdays page at render time.
+model Birthday {
+  id            String   @id @default(cuid())
+  name          String
+  dateOfBirth   DateTime // day-level; stored as UTC midnight. When yearKnown=false the year is forced to 1900 so age math never accidentally leaks.
+  // Set to false when you know the month/day but not the year (e.g. distant
+  // relatives, acquaintances). UI hides all age info in that case.
+  yearKnown     Boolean  @default(true)
+  notes         String?
+  color         String?  // optional hex #rrggbb for the calendar pill
+  avatarEmoji   String   @default("🎂")
+
+  // One-to-one link to the auto-managed calendar Event. SetNull if the event
+  // is deleted out from under us (the UI will re-create it on next edit).
+  linkedEventId String?  @unique
+  linkedEvent   Event?   @relation("BirthdayEvent", fields: [linkedEventId], references: [id], onDelete: SetNull)
+
+  createdById   String
+  createdBy     User     @relation("BirthdayCreator", fields: [createdById], references: [id])
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([dateOfBirth])
+}
+
+// ---------------------------- v4.7: Local Devices ----------------------------
+
+// A named "kiosk" login bound to a specific user identity. Email users can
+// log in from anywhere; local devices are restricted to private-network
+// clients and get their own per-device screensaver opt-in. When a device
+// signs in it inherits the permissions of its `actAsUser` so existing
+// createdBy / permission checks keep working unchanged.
+model LocalDevice {
+  id             String   @id @default(cuid())
+  // Lowercase-normalised login handle. Shown in the app as `name` but the
+  // unique constraint is on the lowercased value for case-insensitive login.
+  name           String   @unique
+  location       String   // Free-form: "Living Room", "Kitchen", …
+  passwordHash   String
+  // Whether this device shows the idle screensaver. Mobile phones (via a
+  // user account, not a device) default to off; only explicit kiosks get
+  // true here.
+  useScreensaver Boolean  @default(true)
+
+  // v4.7.1 — per-device kiosk behaviour. Previously lived on AppSettings as a
+  // single global knob, but families want different idle / sleep rules per
+  // screen (kitchen stays on longer than the bedroom, etc.). Each device now
+  // carries its own values; email sessions simply never arm either feature.
+  // screensaverIdleMinutes: 0 disables auto-screensaver on this device.
+  screensaverIdleMinutes Int     @default(0)
+  sleepModeEnabled       Boolean @default(false)
+  sleepStartTime         String  @default("22:00")
+  sleepEndTime           String  @default("07:00")
+  sleepIdleMinutes       Int     @default(5)
+
+  // User whose identity the device logs in as. Required so all downstream
+  // rows (todos, events, …) still have a real human `createdBy`.
+  actAsUserId    String
+  actAsUser      User     @relation("DeviceActAsUser", fields: [actAsUserId], references: [id], onDelete: Restrict)
+
+  // v4.8.2 — per-kiosk module hide list. ADDITIVE only: it can subtract
+  // from what the app shows, never add back something AppSettings.
+  // disabledModules has already taken away. The lockdown switch ("Settings"
+  // module ID) lets a parent strip the gear icon off a kitchen kiosk so
+  // anyone walking up can't reconfigure the family.
+  hiddenModules  Json     @default("[]")
+
+  // v4.9.5 — kiosk voice readout. When enabled, the ReminderToaster also
+  // speaks new reminders via the Web Speech API. voiceName is the
+  // browser-specific voice string (e.g. "Karen", "Daniel", "Google UK
+  // English Female"); when null we use the device's default. voiceRate
+  // is clamped to [0.5, 2.0] at the API boundary. Voice readout is
+  // automatically suppressed while the device's sleep overlay is active.
+  voiceReadoutEnabled Boolean @default(false)
+  voiceName           String?
+  voiceRate           Float   @default(1.0)
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([actAsUserId])
+}
+
+// ---------------------------- v4: Maintenance ----------------------------
+
+enum DeviceType {
+  CAR
+  MOTORBIKE
+  BICYCLE
+  LAWNMOWER
+  HEDGE_TRIMMER
+  CHAINSAW
+  PRESSURE_WASHER
+  APPLIANCE
+  TOOL
+  OTHER
+}
+
+// Something around the home that needs periodic servicing — cars, bikes,
+// mowers, appliances, etc. `nextServiceDue` is derived from the last service
+// + `serviceIntervalMonths` whenever a ServiceRecord is logged.
+model MaintenanceItem {
+  id                    String     @id @default(cuid())
+  name                  String
+  deviceType            DeviceType @default(OTHER)
+  // Interval between services in months. Standard presets are 3 / 6 / 12 / 24
+  // but any positive integer is accepted.
+  serviceIntervalMonths Int        @default(12)
+  // Identifier to help tell two devices of the same type apart on the
+  // printed service record (registration plate, serial number, model…).
+  identifier            String?
+  // Most recent service date; updated whenever a ServiceRecord is logged.
+  lastServicedAt        DateTime?
+  // Computed from lastServicedAt + serviceIntervalMonths. Null when the
+  // device has never been serviced and no next-due has been set manually.
+  nextServiceDue        DateTime?
+  // When true, the reminder scheduler auto-creates a Reminder on the owner
+  // once nextServiceDue passes. Prevents duplicate spawns via
+  // `lastReminderSpawnedAt`.
+  remindEnabled         Boolean    @default(true)
+  lastReminderSpawnedAt DateTime?
+  // Free-text notes: what was done last service, what's coming up next.
+  notes                 String?
+
+  // --- Registration (e.g. vehicle road tax / MOT). All optional ---
+  registrationNumber        String?   // plate / reference
+  registrationExpiresAt     DateTime?
+  registrationDocFilename   String?   // file on uploads volume; served via /api/maintenance/docs
+  // Stamp so the scheduler nags once per renewal cycle.
+  registrationReminderSpawnedAt DateTime?
+
+  // --- Insurance. All optional ---
+  insuranceProvider         String?
+  insurancePolicyNumber     String?
+  insuranceExpiresAt        DateTime?
+  insuranceDocFilename      String?
+  insuranceReminderSpawnedAt DateTime?
+
+  ownerId               String
+  owner                 User       @relation("MaintenanceOwner", fields: [ownerId], references: [id])
+  serviceRecords        ServiceRecord[]
+
+  createdAt             DateTime   @default(now())
+  updatedAt             DateTime   @updatedAt
+
+  @@index([nextServiceDue])
+  @@index([ownerId])
+}
+
+// One row per completed service. Logging a record moves the parent's
+// lastServicedAt + nextServiceDue forward and clears any pending reminder.
+model ServiceRecord {
+  id                String   @id @default(cuid())
+  itemId            String
+  item              MaintenanceItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  servicedAt        DateTime
+  performedBy       String?  // garage / shop / "self"
+  workDone          String
+  cost              Decimal? @db.Decimal(10, 2)
+  notes             String?
+  loggedById        String
+  loggedBy          User     @relation("ServiceLogger", fields: [loggedById], references: [id])
+  createdAt         DateTime @default(now())
+
+  @@index([itemId, servicedAt])
+}
+
+// ---------------------------- v4.7.4: My Taxes ----------------------------
+//
+// Strictly per-user expense tracker. Every row carries an `ownerId` and the
+// API layer rejects any read or write where session.sub !== ownerId, so a
+// parent never sees another parent's (or child's) receipts. Hidden entirely
+// on kiosk / local-device sessions to keep receipts off shared screens.
+
+// User-editable expense category. Seeded with an ATO-style starter list on
+// first read for each user (`isStarter = true` so the UI can mark them).
+// `hidden` is a soft-delete: keeps historical line items intact while
+// removing the category from new-item pickers.
+model TaxCategory {
+  id        String   @id @default(cuid())
+  ownerId   String
+  owner     User     @relation("TaxCategoryOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  name      String
+  // Free-text guidance shown in the UI ("e.g. drill bits, hand tools").
+  hint      String?
+  position  Int      @default(0)
+  hidden    Boolean  @default(false)
+  isStarter Boolean  @default(false)
+  lineItems TaxLineItem[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([ownerId, name])
+  @@index([ownerId, position])
+}
+
+// One uploaded / hand-entered receipt or invoice. The optional file lives
+// under uploads/receipts/<filename> on the shared volume; only the bare
+// filename is stored.
+model TaxReceipt {
+  id          String   @id @default(cuid())
+  ownerId     String
+  owner       User     @relation("TaxReceiptOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  vendor      String
+  // Day-level; stored as UTC midnight. Used to bucket receipts into FY.
+  date        DateTime
+  // Sum of all line items. We keep it on the row so the list view doesn't
+  // have to aggregate every render. PATCH endpoints recompute on save.
+  totalAmount Decimal  @db.Decimal(12, 2) @default(0)
+  notes       String?
+  // Original receipt file (PDF or image). Kept on the uploads volume; served
+  // via /api/taxes/receipts/[id]/file with strict ownership checks.
+  fileFilename String?
+  fileMimeType String?
+  fileSizeBytes Int?
+  lineItems   TaxLineItem[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([ownerId, date])
+}
+
+// One line on a receipt. Each line carries its own category so a single
+// invoice can split across (e.g.) Tools + Travel.
+model TaxLineItem {
+  id         String      @id @default(cuid())
+  receiptId  String
+  receipt    TaxReceipt  @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  categoryId String?
+  // SetNull (not Cascade) so soft-deleting a category doesn't nuke history.
+  category   TaxCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  label      String
+  amount     Decimal     @db.Decimal(12, 2)
+  position   Int         @default(0)
+
+  @@index([receiptId, position])
+  @@index([categoryId])
+}
+
+// ---------------------------- v4.7.7: Rewards catalogue ----------------------------
+//
+// Family-wide list of things kids can spend points on (e.g. "$1 cash",
+// "30 min screen time", "ice cream"). A category groups related items.
+// On first GET of /api/rewards/categories we seed a starter list (Cash,
+// Sweets, Screen time, Privileges, Other) marked isStarter=true so the UI
+// can show a hint, but they're freely renameable / deletable.
+//
+// Redeeming flow: child POSTs a redemption -> we deduct points immediately
+// and create a PENDING row. Parent fulfils -> status FULFILLED. Parent
+// cancels -> we refund via a positive PointsTransaction and mark
+// CANCELLED. Both parent transitions are recorded for audit.
+
+model RewardCategory {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  // Free-text guidance for the parent UI ("e.g. cash equivalents").
+  hint        String?
+  position    Int      @default(0)
+  hidden      Boolean  @default(false)
+  isStarter   Boolean  @default(false)
+  items       RewardItem[]
+  createdById String
+  createdBy   User     @relation("RewardCategoryCreator", fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([position])
+}
+
+model RewardItem {
+  id           String  @id @default(cuid())
+  name         String
+  description  String?
+  costPoints   Int
+  // Optional category for grouping in the kid-facing catalog. SetNull on
+  // delete so a redeemed item's history survives a category rename.
+  categoryId   String?
+  category     RewardCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  // Optional uploaded hero image — kept on the shared uploads volume at
+  // /app/uploads/reward-images/<filename>. Mirrors recipe-images.ts.
+  imageFilename String?
+  imageMimeType String?
+  // Display ordering within (or across) categories. Drag-reorderable.
+  position     Int      @default(0)
+  // Parent toggle — hidden items disappear from the kids' catalog but
+  // history of past redemptions still references them.
+  available    Boolean  @default(true)
+  createdById  String
+  createdBy    User     @relation("RewardItemCreator", fields: [createdById], references: [id])
+  redemptions  RewardRedemption[]
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([categoryId, position])
+  @@index([available])
+}
+
+enum RewardRedemptionStatus {
+  PENDING
+  FULFILLED
+  CANCELLED
+}
+
+model RewardRedemption {
+  id           String   @id @default(cuid())
+  // Who redeemed (a child).
+  childId      String
+  child        User     @relation("RewardRedeemingChild", fields: [childId], references: [id], onDelete: Cascade)
+  // Linked catalogue item, but ALSO denormalised below so renames /
+  // deletes don't make a redemption record nonsensical.
+  rewardItemId String?
+  rewardItem   RewardItem? @relation(fields: [rewardItemId], references: [id], onDelete: SetNull)
+  // Snapshot at redemption time:
+  itemName     String
+  costPoints   Int
+  status       RewardRedemptionStatus @default(PENDING)
+
+  // The PointsTransaction that *deducted* the cost. Always set.
+  deductTransactionId String  @unique
+  // The PointsTransaction that refunded the cost when CANCELLED. Null
+  // until / unless a parent cancels.
+  refundTransactionId String?  @unique
+
+  // Audit: who fulfilled / cancelled, and when.
+  fulfilledAt    DateTime?
+  fulfilledById  String?
+  cancelledAt    DateTime?
+  cancelledById  String?
+  // Parent who took the latest action (fulfilled or cancelled). Single
+  // relation field used by both columns via a discriminator on the
+  // status field.
+  actor          User?    @relation("RewardRedemptionActor", fields: [actorUserId], references: [id])
+  actorUserId    String?
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([childId, status])
+  @@index([status, createdAt])
+}
+
+// ---------------------------- v4.7.9: Web Push ----------------------------
+//
+// One row per (user, browser/device) push enrolment. The endpoint URL is
+// the unique identifier the browser hands us back from
+// `pushManager.subscribe(...)`. p256dh + auth are the keys the service
+// worker provided; we need both to encrypt the payload server-side.
+//
+// userAgent is a free-text string captured at enrol time so the user can
+// tell their phone from their tablet in the device list. lastSuccessAt /
+// lastFailureAt are stamped each delivery attempt so dead subscriptions
+// surface in the UI; web-push 410 Gone responses also delete the row.
+
+model PushSubscription {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  endpoint    String   @unique
+  p256dh      String
+  auth        String
+  userAgent   String?
+  lastSuccessAt DateTime?
+  lastFailureAt DateTime?
+  lastError     String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([userId])
+}
+
+// ---------------------------- v4.9.0: Public API + Webhooks ----------------------------
+//
+// Family Hub exposes a small read-only REST surface (/api/v1/*) plus an
+// outbound webhook bus for integrations like Home Assistant, n8n, etc.
+// Auth is bearer-token: each integration mints a token (ApiToken) with a
+// scope set. Webhook subscriptions register interest in a list of event
+// types and receive HMAC-SHA256 signed POSTs when those events fire.
+//
+// Tokens are FAMILY-wide, not per-user — the creator FK is bookkeeping
+// only and SetNull on delete so revoking a parent account doesn't strand
+// the integrations the rest of the family depends on.
+
+model ApiToken {
+  id          String   @id @default(cuid())
+  // User-visible label ("HomeAssistant", "n8n", "Bedroom-display-feeder").
+  name        String
+  // The bearer string presented in Authorization headers. We compare in
+  // constant time on every request, so the @unique index is for both
+  // lookup and to prevent accidental collisions across creates.
+  token       String   @unique
+  // Scope strings ("events:read", "todos:write", …). Stored as JSON so
+  // we can add new scopes without a migration. The auth helper rejects
+  // any unknown scope at validation time so a malicious row in the DB
+  // can't grant a scope the app doesn't enforce.
+  scopes      Json     @default("[]")
+  enabled     Boolean  @default(true)
+  // Stamped on every successful authenticated request so the operator
+  // can spot dormant tokens in the UI.
+  lastUsedAt  DateTime?
+  // Optional expiry. Null = never expires. The auth helper rejects
+  // tokens past this instant.
+  expiresAt   DateTime?
+  // Audit only — who created the row. The token works for all integrations
+  // regardless of which parent issued it.
+  createdById String?
+  createdBy   User?    @relation("ApiTokenCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([token])
+}
+
+model WebhookSubscription {
+  id            String   @id @default(cuid())
+  // User-visible label ("HomeAssistant reminders").
+  name          String
+  // HTTP(S) URL we POST to when one of the subscribed events fires.
+  url           String
+  // Random per-subscription secret used to HMAC-SHA256 sign the body.
+  // The subscriber computes the same HMAC over the raw request body and
+  // compares to the X-Family-Hub-Signature header to verify provenance.
+  secret        String
+  // JSON array of event-type strings (e.g. ["reminder.fired", "todo.completed"]).
+  // The dispatcher only fires this row when the outgoing type is in this list.
+  events        Json     @default("[]")
+  enabled       Boolean  @default(true)
+  // Delivery health surfaces. lastError stores the most recent failure
+  // reason (HTTP status + brief body) so the operator can debug without
+  // tailing app logs.
+  lastSuccessAt DateTime?
+  lastFailureAt DateTime?
+  lastError     String?
+  createdById   String?
+  createdBy     User?    @relation("WebhookSubscriptionCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+// ---------------------------- v4.9.2: Sticky notes ----------------------------
+//
+// Family-wide message board ("fridge magnets" use case). Any signed-in
+// user can post; the author can edit / delete their own note and parents
+// can delete anyone's. Pinned notes float to the top of the dashboard
+// widget and the dedicated /notes page.
+//
+// Colour is a small enum-by-convention (`yellow|pink|green|blue`). We
+// don't enforce it at the schema level because the UI's allowed set may
+// grow over time and adding a Prisma enum migration for cosmetics is
+// overkill.
+
+model StickyNote {
+  id        String   @id @default(cuid())
+  body      String
+  // Display colour. Defaults to "yellow" client-side via the API normaliser.
+  color     String   @default("yellow")
+  // Pinned notes sort above non-pinned, both descending by createdAt.
+  pinned    Boolean  @default(false)
+  authorId  String
+  author    User     @relation("StickyNoteAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Composite index supporting the list query: WHERE … ORDER BY pinned
+  // DESC, createdAt DESC. Pinning is rare enough that this index stays
+  // cheap to maintain.
+  @@index([pinned, createdAt])
+}
